@@ -31,7 +31,7 @@ python server.py
 
 ---
 
-## 🛠️ Tools (14 Total) + x402 Payment Gateway
+## 🛠️ Tools (16 Total) + x402 Payment Gateway + WebSocket Tracking
 
 | # | Tool | Description | Tier |
 |---|------|-------------|------|
@@ -49,6 +49,8 @@ python server.py
 | 12 | `get_token_price` | Live price in USD (CoinGecko) | ⭐ Premium |
 | 13 | `get_recent_transactions` | Recent wallet activity (Blockscout) | ⭐ Premium |
 | 14 | `get_payment_status` | Your tier + remaining free calls | ⭐ Premium |
+| 15 | `subscribe` | Subscribe to real-time WebSocket streams | ⭐ Premium |
+| 16 | `get_ws_info` | WebSocket connection info + active channels | 🆓 Free |
 
 ---
 
@@ -121,6 +123,63 @@ AI Agent ──┬── MCP (stdio) ──→ DeFAI Gateway ──┬── Bas
 
 ---
 
+## 📡 WebSocket Real-Time Tracking (New in v2.4)
+
+**Live streaming of pools, wallets, and tokens via WebSocket.**
+
+No polling needed — subscribe to a channel and receive push updates.
+
+### Quick Start
+
+```bash
+# Terminal 1: Start WebSocket server
+python ws_server.py --port 4021
+
+# Terminal 2: Connect with any WebSocket client
+python -c "
+import asyncio, websockets
+async def main():
+    async with websockets.connect('ws://localhost:4021') as ws:
+        await ws.send('{\"subscribe\": \"pools\"}')
+        async for msg in ws:
+            print(msg)
+asyncio.run(main())
+"
+```
+
+### Channels
+
+| Channel | Data | Interval | Example |
+|---------|------|----------|---------|
+| `pools` | Aerodrome pool TVL/APR changes | 30s | `{"subscribe": "pools"}` |
+| `wallet:0x...` | New wallet transactions | 15s | `{"subscribe": "wallet:0xYourAddress"}` |
+| `tokens` | New token deployments | 60s | `{"subscribe": "tokens"}` |
+
+### Protocol
+
+All messages are JSON. Server pushes updates with timestamp and change deltas.
+
+```json
+// Server → Client update
+{"channel": "pools", "type": "pool_update", "data": [...], "timestamp": 1712345678}
+
+// Change detection (only pushes when TVL/APR changes)
+{"channel": "pools", "type": "pool_update", "data": [{
+  "name": "AERO/WETH", "tvl_usd": 48200000, "apr": 14.8,
+  "change": {"tvl_delta": 250000, "apr_delta": 0.3}
+}]}
+```
+
+### Run modes
+
+```bash
+# Standalone
+python ws_server.py --port 4021
+
+# Via server.py
+python server.py --ws
+```
+
 ## 🔄 Swap Flow (AI Agent Example)
 
 A complete swap from USDC → AERO:
@@ -189,16 +248,16 @@ Or **hold $GATE** for unlimited access + swap execution + revenue share.
 - Price monitoring with target comparison (limit-order style)
 - Aerodrome Router ABI integration (full)
 
-### ✅ v2.3 (current)
-- **x402 Payment Gateway** — AI agents pay per API call in USDC on Base
-- HTTP endpoints: /mcp, /deposit, /status, /pricing, /health
-- Credit ledger with on-chain USDC transfer verification
-- Free tier (10 calls/day) + per-call pricing ($0.001) + $GATE holder unlimited
-- Tx dedup, balance tracking, pricing API
-- 12 x402 tests (44 total)
-- Run: `python x402_server.py --port 4020 --fee-wallet 0x...`
+### ✅ v2.4 (current)
+- **WebSocket Real-Time Tracking** — live streaming of pools, wallets, and tokens
+- 16 tools: + subscribe, get_ws_info
+- 3 channels: pools (30s), wallet (15s), tokens (60s)
+- Change detection — only pushes when data changes (TVL delta, APR delta)
+- Auto-cleanup of dead WebSocket connections
+- Standalone: `python ws_server.py` or integrated: `python server.py --ws`
+- 18 WebSocket tests (63 total across test suite)
 
-### 🔜 v2.4 — Next Sprint
+### 🔜 v2.5 — Next Sprint
 - [ ] **x402 Payments** — AI agents pay per API call in USDC
 - [ ] **WebSocket real-time tracking** — live pool updates
 - [ ] **Limit orders** via Aerodrome

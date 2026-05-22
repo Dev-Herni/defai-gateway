@@ -470,8 +470,12 @@ async def get_gas_estimate(swap_tx_data: dict, from_addr: str) -> dict:
 # ═══════════════════════════════════════════════════════════════
 
 mcp = FastMCP("DeFAI Gateway v2",
-    instructions="""DeFAI Gateway v2.2 — AI Agent Gateway to Base Chain DeFi.
+    instructions="""DeFAI Gateway v2.4 — AI Agent Gateway to Base Chain DeFi.
 
+REAL-TIME TRACKING (PREMIUM):
+  subscribe             — Subscribe to live WebSocket streams (pools, wallet, tokens)
+  get_ws_info           — Get WebSocket connection info
+  
 SWAP EXECUTION SYSTEM ($GATE HOLDERS):
   get_swap_quote        — Live quote with price impact and route info
   build_swap_transaction — Full EIP-1559 tx with nonce, gas, chainId (sign with any wallet)
@@ -482,12 +486,13 @@ APPROVAL SYSTEM (FREE):
   check_allowance           — Check current allowance before swapping
 
 TOOLS:
-  FREE (10 calls/day): get_balance, get_token_info, get_gas_price, check_allowance, build_approve_transaction
-  PREMIUM: get_pools, analyze_wallet, track_new_tokens, get_payment_status, get_token_price, get_recent_transactions, monitor_price
+  FREE (10 calls/day): get_balance, get_token_info, get_gas_price, check_allowance, build_approve_transaction, get_ws_info
+  PREMIUM: get_pools, analyze_wallet, track_new_tokens, get_payment_status, get_token_price, get_recent_transactions, monitor_price, subscribe
   $GATE HOLDER: get_swap_quote, build_swap_transaction (must hold $GATE token)
   
 Call premium tools with caller_address parameter to track usage.
 SWAP FLOW: check_allowance → build_approve_transaction → get_swap_quote → build_swap_transaction → sign in wallet → send
+WS FLOW:  get_ws_info → connect via WebSocket → {"subscribe": "pools"} → receive live updates
 """)
 
 # ─── TOOL 1: get_balance ───────────────────────────────────
@@ -1290,6 +1295,87 @@ async def get_recent_transactions(address: str, limit: int = 5, caller_address: 
     except Exception as e:
         return json_error(str(e))
 
+# ─── TOOL 15: subscribe (PREMIUM) ──────────────────────────
+@mcp.tool()
+async def subscribe(
+    channel: str,
+    webhook_url: str = None,
+    caller_address: str = None
+) -> str:
+    """Subscribe to real-time data streams. PREMIUM tier.
+    
+    Stream live updates via WebSocket to ws://localhost:4021.
+    Supported channels:
+      pools              — Live Aerodrome pool TVL/APR changes (30s intervals)
+      wallet:0xAddress   — Monitor wallet for new transactions (15s intervals)
+      tokens             — New token deployments on Base (60s intervals)
+    
+    Args:
+        channel: Channel name (e.g. 'pools', 'wallet:0x...', 'tokens')
+        webhook_url: Optional HTTP endpoint for push notifications
+        caller_address: Your wallet (premium tier)
+    """
+    gate = require_premium(caller_address)
+    if gate: return gate
+    
+    valid_base = ["pools", "tokens"]
+    is_wallet = channel.startswith("wallet:") and len(channel) == 47 and channel[7:].startswith("0x")
+    
+    if channel not in valid_base and not is_wallet:
+        return json_error(f"Invalid channel: {channel}. Use: pools, wallet:0x..., tokens")
+    
+    try:
+        from ws_server import WS_PORT, POLL_POOLS, POLL_WALLET, POLL_TOKENS, sub_mgr
+        
+        result = {
+            "channel": channel,
+            "status": "active",
+            "ws_endpoint": f"ws://localhost:{WS_PORT}",
+            "protocol": 'Send JSON: {"subscribe": "' + channel + '"}',
+            "instructions": f"Connect via WebSocket to ws://localhost:{WS_PORT}, then send subscribe command",
+        }
+        
+        if webhook_url:
+            result["webhook_url"] = webhook_url
+            result["poll_interval_seconds"] = {
+                "pools": POLL_POOLS,
+                "wallet": POLL_WALLET,
+                "tokens": POLL_TOKENS,
+            }.get(channel.split(":")[0], 30)
+    except ImportError:
+        result = {
+            "channel": channel,
+            "status": "pending",
+            "message": "WebSocket server not running. Start with: python ws_server.py",
+            "instructions": "Run 'python ws_server.py --port 4021' in another terminal",
+        }
+    
+    return json_ok(result)
+
+# ─── TOOL 16: get_ws_info (FREE) ──────────────────────────
+@mcp.tool()
+async def get_ws_info(caller_address: str = None) -> str:
+    """Get WebSocket connection info and active channels. FREE tier."""
+    try:
+        from ws_server import WS_PORT, POLL_POOLS, POLL_WALLET, POLL_TOKENS, sub_mgr
+        active = len(sub_mgr._channels.get("pools", set()))
+        return json_ok({
+            "ws_endpoint": f"ws://localhost:{WS_PORT}",
+            "channels": ["pools", "wallet:<address>", "tokens"],
+            "protocol": 'Send JSON: {"subscribe": "<channel>"}',
+            "poll_intervals_seconds": {
+                "pools": POLL_POOLS, "wallet": POLL_WALLET, "tokens": POLL_TOKENS,
+            },
+            "active_subscriptions": active,
+        })
+    except ImportError:
+        return json_ok({
+            "ws_endpoint": "ws://localhost:4021",
+            "channels": ["pools", "wallet:<address>", "tokens"],
+            "status": "not_running",
+            "instructions": "Start with: python ws_server.py --port 4021",
+        })
+
 # ═══════════════════════════════════════════════════════════════
 # RUN
 # ═══════════════════════════════════════════════════════════════
@@ -1309,5 +1395,13 @@ if __name__ == "__main__":
         except ImportError as e:
             print(f"[!] x402 module not available: {e}", file=sys.stderr)
             print("[!] Run: python x402_server.py --port 4020", file=sys.stderr)
+    elif "--ws" in sys.argv:
+        print("WebSocket mode: Starting real-time tracking server...", file=sys.stderr)
+        try:
+            from ws_server import run_ws_server
+            run_ws_server()
+        except ImportError as e:
+            print(f"[!] WS module not available: {e}", file=sys.stderr)
+            print("[!] Run: python ws_server.py --port 4021", file=sys.stderr)
     else:
         mcp.run(transport="stdio")
