@@ -486,9 +486,13 @@ APPROVAL SYSTEM (FREE):
   check_allowance           — Check current allowance before swapping
 
 TOOLS:
-  FREE (10 calls/day): get_balance, get_token_info, get_gas_price, check_allowance, build_approve_transaction, get_ws_info
+  FREE (10 calls/day): get_balance, get_token_info, get_gas_price, check_allowance, build_approve_transaction, get_ws_info,
+                       sol_get_balance, sol_get_token_info, sol_get_recent_txs, sol_get_gas_price, sol_analyze_wallet
   PREMIUM: get_pools, analyze_wallet, track_new_tokens, get_payment_status, get_token_price, get_recent_transactions, monitor_price, subscribe
   $GATE HOLDER: get_swap_quote, build_swap_transaction (must hold $GATE token)
+  
+SOLANA SUPPORT (FREE, no API key needed):
+  Solana addresses (base58) auto-detected — all 5 sol_* tools work on Solana mainnet
   
 Call premium tools with caller_address parameter to track usage.
 SWAP FLOW: check_allowance → build_approve_transaction → get_swap_quote → build_swap_transaction → sign in wallet → send
@@ -1375,6 +1379,60 @@ async def get_ws_info(caller_address: str = None) -> str:
             "status": "not_running",
             "instructions": "Start with: python ws_server.py --port 4021",
         })
+
+# ─── TOOL 17: sol_get_balance (FREE) ─────────────────────
+@mcp.tool()
+async def sol_get_balance(address: str) -> str:
+    """Get SOL and SPL token balances for a Solana wallet. FREE tier.
+    
+    Automatically detects Solana addresses (base58).
+    
+    Args:
+        address: Solana wallet address
+    """
+    from solana_server import sol_get_balance as _sol_bal
+    return await _sol_bal(address)
+
+# ─── TOOL 18: sol_get_token_info (FREE) ──────────────────
+@mcp.tool()
+async def sol_get_token_info(mint_address: str) -> str:
+    """Get Solana SPL token metadata. FREE tier.
+    
+    Args:
+        mint_address: SPL token mint address
+    """
+    from solana_server import sol_get_token_info as _sol_info
+    return await _sol_info(mint_address)
+
+# ─── TOOL 19: sol_get_recent_txs (FREE) ──────────────────
+@mcp.tool()
+async def sol_get_recent_txs(address: str, limit: int = 5) -> str:
+    """Get recent Solana transactions. FREE tier.
+    
+    Args:
+        address: Solana wallet address
+        limit: Max transactions (default 5, max 25)
+    """
+    from solana_server import sol_get_recent_txs as _sol_txs
+    return await _sol_txs(address, limit)
+
+# ─── TOOL 20: sol_get_gas_price (FREE) ───────────────────
+@mcp.tool()
+async def sol_get_gas_price() -> str:
+    """Get current Solana fee (lamports per signature). FREE tier."""
+    from solana_server import sol_get_gas_price as _sol_gas
+    return await _sol_gas()
+
+# ─── TOOL 21: sol_analyze_wallet (FREE) ──────────────────
+@mcp.tool()
+async def sol_analyze_wallet(address: str) -> str:
+    """Full Solana wallet analysis: balance, tokens, recent txs. FREE tier.
+    
+    Args:
+        address: Solana wallet address
+    """
+    from solana_server import sol_analyze_wallet as _sol_wallet
+    return await _sol_wallet(address)
 
 # ═══════════════════════════════════════════════════════════════
 # RUN
