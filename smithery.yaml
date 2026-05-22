@@ -1,0 +1,29 @@
+# Smithery deployment config for DeFAI Gateway MCP Server
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      rpcUrl:
+        type: string
+        default: "https://mainnet.base.org"
+        description: "Base RPC endpoint"
+      gateToken:
+        type: string
+        default: ""
+        description: "$GATE token address for token gating"
+      dailyFreeCalls:
+        type: number
+        default: 10
+        description: "Free tier daily call limit"
+  commandFunction: |
+    (config) => ({
+      command: "python",
+      args: ["server.py"],
+      env: {
+        RPC_URL: config.rpcUrl || "https://mainnet.base.org",
+        GATE_TOKEN: config.gateToken || "",
+        DAILY_FREE_CALLS: String(config.dailyFreeCalls || 10),
+        PYTHONUNBUFFERED: "1"
+      }
+    })
