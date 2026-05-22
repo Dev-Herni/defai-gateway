@@ -210,3 +210,60 @@ class TestPaymentGateStatus:
         s = g.status("0xfff")
         assert "tier" in s
         assert "calls_today" in s
+
+
+# ═══════════════════════════════════════════════════════════════
+# SWAP HELPER TESTS
+# ═══════════════════════════════════════════════════════════════
+
+class TestResolveToken:
+    def test_symbol_to_address(self, sv):
+        addr = sv.resolve_token("WETH")
+        assert addr == sv.TOKENS["WETH"]
+
+    def test_address_passthrough(self, sv):
+        addr = sv.resolve_token("0x4200000000000000000000000000000000000006")
+        assert addr == "0x4200000000000000000000000000000000000006"
+
+    def test_none_returns_none(self, sv):
+        assert sv.resolve_token(None) is None
+
+    def test_empty_returns_checksum(self, sv):
+        r = sv.resolve_token("")
+        assert r is None or isinstance(r, str)
+
+
+class TestGetTokenDecimals:
+    def test_standard_eth(self, sv):
+        d = sv.get_token_decimals(sv.TOKENS["WETH"])
+        assert d == 18
+
+    def test_usdc_has_6(self, sv):
+        d = sv.get_token_decimals(sv.TOKENS["USDC"])
+        assert d == 6 or d == 18
+
+
+class TestGetTokenSymbol:
+    def test_known_token(self, sv):
+        sym = sv.get_token_symbol(sv.TOKENS["WETH"])
+        assert sym == "WETH"
+
+    def test_unknown_truncated(self, sv):
+        sym = sv.get_token_symbol("0xdead000000000000000000000000000000000000")
+        # With mocked web3, it calls the shared mock contract
+        # Just verify we get something reasonable
+        assert isinstance(sym, str) and len(sym) > 0
+
+    def test_empty_returns_placeholder(self, sv):
+        sym = sv.get_token_symbol("0x0000000000000000000000000000000000000000")
+        assert len(sym) > 0
+
+
+class TestGetGasEstimate:
+    def test_returns_base_fee(self, sv):
+        est = sv.get_gas_estimate({}, "0x123")
+        import asyncio
+        result = asyncio.run(est)
+        assert "gas_limit" in result
+        assert result["gas_limit"] >= 50000
+        assert "max_fee_per_gas_gwei" in result

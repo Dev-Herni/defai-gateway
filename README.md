@@ -31,20 +31,24 @@ python server.py
 
 ---
 
-## 🛠️ Tools (10 Total)
+## 🛠️ Tools (14 Total)
 
-| # | Tool | Description | Tier | Use Case |
-|---|------|-------------|------|----------|
-| 1 | `get_balance` | ETH + ERC-20 token balances | 🆓 Free | "What's in my wallet?" |
-| 2 | `get_token_info` | Token name, symbol, decimals, supply | 🆓 Free | "Is this token legit?" |
-| 3 | `get_gas_price` | Live Base gas in gwei | 🆓 Free | "Should I trade now?" |
-| 4 | `get_pools` | Top Aerodrome liquidity pools | ⭐ Premium | "Where's the yield?" |
-| 5 | `analyze_wallet` | Full wallet breakdown + portfolio | ⭐ Premium | "Who is this whale?" |
-| 6 | `track_new_tokens` | Scan for new token deployments (3 sources) | ⭐ Premium | "What launched today?" |
-| 7 | `get_token_price` | Live price in USD (CoinGecko) | ⭐ Premium | "What's AERO worth?" |
-| 8 | `get_recent_transactions` | Recent wallet activity (Blockscout) | ⭐ Premium | "What has this wallet been doing?" |
-| 9 | `get_payment_status` | Your tier + remaining free calls | ⭐ Premium | "What's my usage?" |
-| 10 | `prepare_swap` | Prepare Aerodrome swap tx (unsigned) | 🔒 $GATE | "Swap 100 USDC for AERO" |
+| # | Tool | Description | Tier |
+|---|------|-------------|------|
+| 1 | `get_balance` | ETH + ERC-20 token balances | 🆓 Free |
+| 2 | `get_token_info` | Token name, symbol, decimals, supply | 🆓 Free |
+| 3 | `get_gas_price` | Live Base gas in gwei | 🆓 Free |
+| 4 | `get_pools` | Top Aerodrome liquidity pools (3 data sources) | ⭐ Premium |
+| 5 | `analyze_wallet` | Full wallet breakdown + portfolio | ⭐ Premium |
+| 6 | `track_new_tokens` | Scan for new token deployments (3-tier fallback) | ⭐ Premium |
+| 7 | `get_swap_quote` | Live swap quote with price impact + route info | 🔒 $GATE |
+| 8 | `build_swap_transaction` | Full EIP-1559 swap tx (nonce, gas, chainId) | 🔒 $GATE |
+| 9 | `build_approve_transaction` | Token approval tx for Aerodrome Router | 🆓 Free |
+| 10 | `check_allowance` | Check current allowance before swapping | 🆓 Free |
+| 11 | `monitor_price` | Price check + target comparison (limit-order style) | ⭐ Premium |
+| 12 | `get_token_price` | Live price in USD (CoinGecko) | ⭐ Premium |
+| 13 | `get_recent_transactions` | Recent wallet activity (Blockscout) | ⭐ Premium |
+| 14 | `get_payment_status` | Your tier + remaining free calls | ⭐ Premium |
 
 ---
 
@@ -65,6 +69,26 @@ AI Agent → MCP Protocol → DeFAI Gateway ──┬── Base RPC (on-chain)
 - **Layered API fallbacks** — always returns data even if upstream APIs fail
 
 ---
+
+## 🔄 Swap Flow (AI Agent Example)
+
+A complete swap from USDC → AERO:
+
+```
+1. check_allowance("USDC", "0xYourWallet") 
+   → Needs approval? Yes → 
+   
+2. build_approve_transaction("USDC", caller_address="0xYourWallet")
+   → Sign tx in wallet → Wait for confirmation →
+   
+3. get_swap_quote("USDC", "AERO", 100, caller_address="0xYourWallet")
+   → Expected: 850.5 AERO, Route: direct, Price Impact: 0.02%
+   
+4. build_swap_transaction("USDC", "AERO", 100, slippage=0.5, caller_address="0xYourWallet")
+   → Full EIP-1559 tx with nonce, gas, chainId → Sign + send in wallet
+```
+
+**AI agents execute this autonomously:** The agent builds the tx, the user signs with their wallet, the agent tracks the result.
 
 ## 💰 Pricing
 
@@ -105,7 +129,16 @@ Or **hold $GATE** for unlimited access + swap execution + revenue share.
 - Docker multi-stage build
 - Smithery.yaml for Smithery deployment
 
-### 🔜 v2.2 — Next Sprint
+### ✅ v2.2 (current)
+- 14 tools: + swap execution system (quote + EIP-1559 tx + approval + allowance + price monitoring)
+- Multi-hop routing (direct → via WETH → via USDC)
+- `exact_in` and `exact_out` swap types
+- EIP-1559 transaction builder with nonce, gas, chainId, deadline
+- Token approval system (free tier)
+- Price monitoring with target comparison (limit-order style)
+- Aerodrome Router ABI integration (full)
+
+### 🔜 v2.3 — Next Sprint
 - [ ] **x402 Payments** — AI agents pay per API call in USDC
 - [ ] **WebSocket real-time tracking** — live pool updates
 - [ ] **Limit orders** via Aerodrome

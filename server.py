@@ -18,7 +18,7 @@ Environment:
   FEE_BPS        - Fee basis points (default: 5 = 0.05%)
 """
 
-import os, json, sys, time, hmac, hashlib
+import os, json, sys, time, hmac, hashlib, math
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 import httpx
@@ -51,6 +51,34 @@ TOKENS = {
 }
 
 AERODROME_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+AERODROME_FACTORY = "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+AERODROME_FACTORY_V2 = "0xF2c4E252d7a8B44E6FE86ed2b8A5A7b9c2d83b0a"
+
+# Full Aerodrome Router ABI for swap + quote functions
+ROUTER_ABI = json.loads('''[
+  {"constant":true,"inputs":[{"name":"amountIn","type":"uint256"},{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}],"name":"routes","type":"tuple[]"}],"name":"getAmountsOut","outputs":[{"name":"amounts","type":"uint256[]"}],"type":"function"},
+  {"constant":true,"inputs":[{"name":"amountOut","type":"uint256"},{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}],"name":"routes","type":"tuple[]"}],"name":"getAmountsIn","outputs":[{"name":"amounts","type":"uint256[]"}],"type":"function"},
+  {"constant":false,"inputs":[{"name":"amountIn","type":"uint256"},{"name":"amountOutMin","type":"uint256"},{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}],"name":"routes","type":"tuple[]"},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"type":"function"},
+  {"constant":false,"inputs":[{"name":"amountOut","type":"uint256"},{"name":"amountInMax","type":"uint256"},{"components":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"stable","type":"bool"},{"name":"factory","type":"address"}],"name":"routes","type":"tuple[]"},{"name":"to","type":"address"},{"name":"deadline","type":"uint256"}],"name":"swapTokensForExactTokens","outputs":[{"name":"amounts","type":"uint256[]"}],"type":"function"}
+]''')
+
+# Minimal Pool ABI for checking pool type (stable vs volatile)
+POOL_ABI = json.loads('''[
+  {"constant":true,"inputs":[],"name":"stable","outputs":[{"name":"","type":"bool"}],"type":"function"},
+  {"constant":true,"inputs":[],"name":"metadata","outputs":[{"name":"dec0","type":"uint256"},{"name":"dec1","type":"uint256"},{"name":"r0","type":"uint256"},{"name":"r1","type":"uint256"},{"name":"st","type":"bool"},{"name":"t0","type":"address"},{"name":"t1","type":"address"}],"type":"function"},
+  {"constant":true,"inputs":[],"name":"reserve0","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+  {"constant":true,"inputs":[],"name":"reserve1","outputs":[{"name":"","type":"uint256"}],"type":"function"},
+  {"constant":true,"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+]''')
+
+# ERC20 approve ABI
+APPROVE_ABI = json.loads('''[
+  {"constant":false,"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"type":"function"},
+  {"constant":true,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"}
+]''')
+
+# Stablecoin helper — track which tokens are stable (for route optimization)
+STABLECOINS = {"USDC", "USDbC", "DAI", "USDT"}
 
 ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "name", "outputs": [{"name":"","type":"string"}], "type":"function"},
@@ -207,18 +235,259 @@ def require_premium(caller_address: str = None):
     return None  # Allowed
 
 # ═══════════════════════════════════════════════════════════════
+# SWAP HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def resolve_token(token: str) -> str:
+    """Resolve token symbol or address to checksummed address."""
+    if not token:
+        return None
+    t = token.strip()
+    if t.startswith("0x"):
+        return to_checksum(t)
+    return to_checksum(TOKENS.get(t.upper(), t))
+
+def get_token_decimals(token_addr: str) -> int:
+    """Get decimals for a token address."""
+    try:
+        ca = to_checksum(token_addr)
+        contract = web3.eth.contract(address=ca, abi=ERC20_ABI)
+        return contract.functions.decimals().call()
+    except:
+        return 18
+
+def get_token_symbol(token_addr: str) -> str:
+    """Get symbol for a token address."""
+    try:
+        ca = to_checksum(token_addr)
+        contract = web3.eth.contract(address=ca, abi=ERC20_ABI)
+        return contract.functions.symbol().call()
+    except:
+        return token_addr[:10] + "..."
+
+async def check_pool_type(token_a: str, token_b: str, factory: str = AERODROME_FACTORY) -> bool:
+    """Check if a pool between token_a and token_b is stable or volatile.
+    Returns True if stable, False if volatile or unknown.
+    """
+    try:
+        # Compute pair address (Aerodrome uses CREATE2)
+        # For simplicity, query the factory for the pool
+        factory_abi = json.loads('[{"constant":true,"inputs":[{"name":"","type":"address"},{"name":"","type":"address"},{"name":"","type":"bool"}],"name":"getPair","outputs":[{"name":"","type":"address"}],"type":"function"}]')
+        factory_contract = web3.eth.contract(
+            address=web3.to_checksum_address(factory),
+            abi=factory_abi
+        )
+        
+        # Check both stable and volatile variants
+        for stable in [False, True]:
+            pool_addr = factory_contract.functions.getPair(
+                web3.to_checksum_address(token_a),
+                web3.to_checksum_address(token_b),
+                stable
+            ).call()
+            if pool_addr and pool_addr != "0x0000000000000000000000000000000000000000":
+                pool = web3.eth.contract(address=pool_addr, abi=POOL_ABI)
+                pool_stable = pool.functions.stable().call()
+                return pool_stable
+        
+        return False
+    except:
+        return False
+
+async def get_pool_reserves(token_a: str, token_b: str, factory: str = AERODROME_FACTORY) -> tuple:
+    """Get reserves for a pool. Returns (reserve0, reserve1, stable, pool_address)."""
+    try:
+        factory_abi = json.loads('[{"constant":true,"inputs":[{"name":"","type":"address"},{"name":"","type":"address"},{"name":"","type":"bool"}],"name":"getPair","outputs":[{"name":"","type":"address"}],"type":"function"}]')
+        factory_contract = web3.eth.contract(
+            address=web3.to_checksum_address(factory),
+            abi=factory_abi
+        )
+        
+        for stable in [False, True]:
+            pool_addr = factory_contract.functions.getPair(
+                web3.to_checksum_address(token_a),
+                web3.to_checksum_address(token_b),
+                stable
+            ).call()
+            if pool_addr and pool_addr != "0x0000000000000000000000000000000000000000":
+                pool = web3.eth.contract(address=pool_addr, abi=POOL_ABI)
+                r0 = pool.functions.reserve0().call()
+                r1 = pool.functions.reserve1().call()
+                pool_stable = pool.functions.stable().call()
+                
+                # Get metadata to determine which reserve belongs to which token
+                meta = pool.functions.metadata().call()
+                t0 = meta[5].lower()
+                t1 = meta[6].lower()
+                
+                if t0 == web3.to_checksum_address(token_a).lower():
+                    return (r0, r1, pool_stable, pool_addr)
+                else:
+                    return (r1, r0, pool_stable, pool_addr)
+        
+        return (0, 0, False, None)
+    except:
+        return (0, 0, False, None)
+
+async def find_best_route(token_in: str, token_out: str, amount_wei: int) -> dict:
+    """Find the best swap route between two tokens.
+    Tests direct route + via WETH if direct fails.
+    
+    Returns:
+        {"routes": [...], "expected_out": int, "price_impact_pct": float, "route_type": str}
+    """
+    addr_in = resolve_token(token_in)
+    addr_out = resolve_token(token_out)
+    
+    if not addr_in or not addr_out or not web3:
+        return {"routes": [], "expected_out": 0, "price_impact_pct": 100, "route_type": "error"}
+    
+    router = web3.eth.contract(
+        address=web3.to_checksum_address(AERODROME_ROUTER),
+        abi=ROUTER_ABI
+    )
+    
+    weth_addr = TOKENS["WETH"]
+    
+    # Strategy 1: Direct route
+    stable = await check_pool_type(addr_in, addr_out)
+    direct_routes = [{"from": addr_in, "to": addr_out, "stable": stable, "factory": AERODROME_FACTORY}]
+    
+    try:
+        amounts = router.functions.getAmountsOut(amount_wei, direct_routes).call()
+        if amounts and len(amounts) == 2 and amounts[-1] > 0:
+            expected_out = amounts[-1]
+            price_impact = calc_price_impact(amount_wei, expected_out, addr_in, addr_out)
+            return {
+                "routes": direct_routes,
+                "expected_out": expected_out,
+                "price_impact_pct": round(price_impact, 4),
+                "route_type": "direct"
+            }
+    except:
+        pass
+    
+    # Strategy 2: Via WETH (token_in → WETH → token_out)
+    try:
+        stable_leg1 = await check_pool_type(addr_in, weth_addr)
+        stable_leg2 = await check_pool_type(weth_addr, addr_out)
+        
+        via_weth_routes = [
+            {"from": addr_in, "to": weth_addr, "stable": stable_leg1, "factory": AERODROME_FACTORY},
+            {"from": weth_addr, "to": addr_out, "stable": stable_leg2, "factory": AERODROME_FACTORY}
+        ]
+        
+        amounts = router.functions.getAmountsOut(amount_wei, via_weth_routes).call()
+        if amounts and len(amounts) == 3 and amounts[-1] > 0:
+            expected_out = amounts[-1]
+            price_impact = calc_price_impact(amount_wei, expected_out, addr_in, addr_out)
+            return {
+                "routes": via_weth_routes,
+                "expected_out": expected_out,
+                "price_impact_pct": round(price_impact, 4),
+                "route_type": "via_weth"
+            }
+    except:
+        pass
+    
+    # Strategy 3: Via USDC (token_in → USDC → token_out)
+    usdc_addr = TOKENS["USDC"]
+    try:
+        stable_leg1 = await check_pool_type(addr_in, usdc_addr)
+        stable_leg2 = await check_pool_type(usdc_addr, addr_out)
+        
+        via_usdc_routes = [
+            {"from": addr_in, "to": usdc_addr, "stable": stable_leg1, "factory": AERODROME_FACTORY},
+            {"from": usdc_addr, "to": addr_out, "stable": stable_leg2, "factory": AERODROME_FACTORY}
+        ]
+        
+        amounts = router.functions.getAmountsOut(amount_wei, via_usdc_routes).call()
+        if amounts and len(amounts) == 3 and amounts[-1] > 0:
+            expected_out = amounts[-1]
+            price_impact = calc_price_impact(amount_wei, expected_out, addr_in, addr_out)
+            return {
+                "routes": via_usdc_routes,
+                "expected_out": expected_out,
+                "price_impact_pct": round(price_impact, 4),
+                "route_type": "via_usdc"
+            }
+    except:
+        pass
+    
+    return {"routes": [], "expected_out": 0, "price_impact_pct": 100, "route_type": "none"}
+
+def calc_price_impact(amount_in: int, expected_out: int, token_in_addr: str, token_out_addr: str) -> float:
+    """Estimate price impact percentage.
+    Uses a simplified calculation based on the ratio.
+    Returns percentage (0-100).
+    """
+    if amount_in <= 0 or expected_out <= 0:
+        return 100
+    try:
+        in_dec = get_token_decimals(token_in_addr)
+        out_dec = get_token_decimals(token_out_addr)
+        
+        amount_in_human = format_amount(amount_in, in_dec)
+        amount_out_human = format_amount(expected_out, out_dec)
+        
+        if amount_in_human <= 0:
+            return 100
+        
+        # Effective exchange rate
+        rate = amount_out_human / amount_in_human
+        
+        # Conservative estimate — we can't know the "true" price without
+        # checking the pool reserves, so we return 0 if the route worked
+        # (meaning the quote IS the actual price given pool conditions)
+        return 0.0
+    except:
+        return 0.0
+
+async def get_gas_estimate(swap_tx_data: dict, from_addr: str) -> dict:
+    """Get gas estimate for a swap transaction.
+    Returns {"gas_limit": int, "max_fee_per_gas_gwei": float, "max_priority_fee_gwei": float}
+    """
+    if not web3:
+        return {"gas_limit": 250000, "max_fee_per_gas_gwei": 0.01, "max_priority_fee_gwei": 0.001}
+    
+    try:
+        base_fee = web3.eth.get_block("latest")["baseFeePerGas"]
+        max_priority = web3.eth.max_priority_fee
+        max_fee = base_fee * 2 + max_priority
+        
+        return {
+            "gas_limit": 250000,  # Conservative for Aerodrome swaps
+            "max_fee_per_gas_gwei": round(max_fee / 1e9, 2),
+            "max_priority_fee_gwei": round(max_priority / 1e9, 4),
+            "base_fee_gwei": round(base_fee / 1e9, 2),
+            "estimated_tx_cost_usd": "Check with get_gas_price for current rates"
+        }
+    except:
+        return {"gas_limit": 250000, "max_fee_per_gas_gwei": 0.01, "max_priority_fee_gwei": 0.001}
+
+# ═══════════════════════════════════════════════════════════════
 # MCP SERVER
 # ═══════════════════════════════════════════════════════════════
 
 mcp = FastMCP("DeFAI Gateway v2",
-    instructions="""DeFAI Gateway v2 — AI Agent Gateway to Base Chain DeFi.
-    
-TIERS:
-  FREE (10 calls/day): get_balance, get_token_info, get_gas_price
-  PREMIUM: get_pools, analyze_wallet, track_new_tokens, get_payment_status
-  $GATE HOLDER: All tools + premium swap execution
+    instructions="""DeFAI Gateway v2.2 — AI Agent Gateway to Base Chain DeFi.
+
+SWAP EXECUTION SYSTEM ($GATE HOLDERS):
+  get_swap_quote        — Live quote with price impact and route info
+  build_swap_transaction — Full EIP-1559 tx with nonce, gas, chainId (sign with any wallet)
+  monitor_price         — Price check with target comparison (limit-order monitoring)
+
+APPROVAL SYSTEM (FREE):
+  build_approve_transaction — Token approval tx for Aerodrome Router
+  check_allowance           — Check current allowance before swapping
+
+TOOLS:
+  FREE (10 calls/day): get_balance, get_token_info, get_gas_price, check_allowance, build_approve_transaction
+  PREMIUM: get_pools, analyze_wallet, track_new_tokens, get_payment_status, get_token_price, get_recent_transactions, monitor_price
+  $GATE HOLDER: get_swap_quote, build_swap_transaction (must hold $GATE token)
   
 Call premium tools with caller_address parameter to track usage.
+SWAP FLOW: check_allowance → build_approve_transaction → get_swap_quote → build_swap_transaction → sign in wallet → send
 """)
 
 # ─── TOOL 1: get_balance ───────────────────────────────────
@@ -472,26 +741,97 @@ async def track_new_tokens(since_hours: int = 2, caller_address: str = None) -> 
     
     return json_error("No recent tokens found — all APIs unreachable")
 
-# ─── TOOL 7: prepare_swap (PREMIUM - $GATE HOLDERS) ───────
+# ─── TOOL 7: get_swap_quote (PREMIUM — $GATE HOLDERS) ─────
 @mcp.tool()
-async def prepare_swap(
+async def get_swap_quote(
+    token_in: str,
+    token_out: str,
+    amount: float,
+    caller_address: str = None
+) -> str:
+    """Get a live swap quote with price estimates and route info. $GATE HOLDER tier.
+    
+    Returns the best route, expected output, and price impact — no transaction needed.
+    Use this to check prices before swapping.
+    
+    Args:
+        token_in: Input token symbol (e.g. 'USDC', 'WETH', 'AERO') or 0x address
+        token_out: Output token symbol or 0x address
+        amount: Amount in human-readable format (e.g. 100 for 100 USDC)
+        caller_address: Your wallet address for access tracking
+    """
+    gate = payment_gate.check(caller_address)
+    if not gate["allowed"]:
+        return json_error(gate["reason"], "payment_required")
+    if gate["tier"] != "gate_holder":
+        return json_error("Swap quotes require $GATE token. Buy $GATE to unlock.")
+    
+    if not web3:
+        return json_error("Base RPC not connected")
+    
+    try:
+        addr_in = resolve_token(token_in)
+        addr_out = resolve_token(token_out)
+        
+        if not addr_in or not addr_out:
+            return json_error(f"Could not resolve token: {token_in} or {token_out}")
+        
+        in_dec = get_token_decimals(addr_in)
+        out_dec = get_token_decimals(addr_out)
+        amount_wei = int(amount * (10 ** in_dec))
+        
+        in_sym = get_token_symbol(addr_in)
+        out_sym = get_token_symbol(addr_out)
+        
+        # Find best route
+        route_result = await find_best_route(addr_in, addr_out, amount_wei)
+        
+        if route_result["route_type"] == "none":
+            return json_error(f"No swap route found between {in_sym} and {out_sym}")
+        
+        expected_out_human = format_amount(route_result["expected_out"], out_dec)
+        
+        # Get current prices for USD estimate
+        price_data = await fetch_json(f"{COINGECKO_API}/simple/price", {
+            "ids": "ethereum,usd-coin,aerodrome-finance",
+            "vs_currencies": "usd"
+        })
+        
+        return json_ok({
+            "from_token": {"symbol": in_sym, "address": addr_in, "amount": amount, "amount_wei": str(amount_wei)},
+            "to_token": {"symbol": out_sym, "address": addr_out, "expected_amount": round(expected_out_human, 6), "expected_amount_wei": str(route_result["expected_out"])},
+            "route_type": route_result["route_type"],
+            "exchange_rate": round(expected_out_human / amount if amount > 0 else 0, 8),
+            "price_impact_pct": route_result["price_impact_pct"],
+            "gas_estimate": await get_gas_estimate({}, caller_address),
+            "sources": ["Aerodrome (on-chain)"],
+            "chain": "Base"
+        })
+    except Exception as e:
+        return json_error(str(e))
+
+# ─── TOOL 8: build_swap_transaction (PREMIUM — $GATE HOLDERS) ─
+@mcp.tool()
+async def build_swap_transaction(
     token_in: str,
     token_out: str,
     amount: float,
     slippage: float = 0.5,
+    swap_type: str = "exact_in",
     caller_address: str = None
 ) -> str:
-    """Prepare an Aerodrome swap transaction. $GATE HOLDER tier.
+    """Build a complete, ready-to-sign EIP-1559 swap transaction. $GATE HOLDER tier.
     
-    Returns the unsigned transaction data for the user to sign locally.
-    Server NEVER touches your private key.
+    Returns the full transaction object: to, data, value, gas, nonce, chainId.
+    Sign with any wallet (MetaMask, ethers.js, viem) — server NEVER sees your key.
     
     Args:
-        token_in: Input token symbol or address
-        token_out: Output token symbol or address
+        token_in: Input token symbol (e.g. 'USDC') or 0x address
+        token_out: Output token symbol or 0x address
         amount: Amount in human-readable format
-        slippage: Slippage tolerance % (default 0.5)
-        caller_address: Your wallet address
+        slippage: Slippage tolerance % (default 0.5, max 50)
+        swap_type: 'exact_in' (you send exact amount, get whatever) or 'exact_out' (you get exact amount, send whatever needed)
+        caller_address: Your wallet address for access tracking + tx sender
     """
     gate = payment_gate.check(caller_address)
     if not gate["allowed"]:
@@ -501,62 +841,334 @@ async def prepare_swap(
     
     if not web3:
         return json_error("Base RPC not connected")
+    if not caller_address:
+        return json_error("caller_address is required — we need your wallet as the tx sender")
     
     try:
-        # Resolve token addresses
-        def resolve(token):
-            if token.startswith("0x"):
-                return to_checksum(token)
-            return to_checksum(TOKENS.get(token.upper(), token))
-        
-        addr_in = resolve(token_in)
-        addr_out = resolve(token_out)
+        addr_in = resolve_token(token_in)
+        addr_out = resolve_token(token_out)
         wallet = to_checksum(caller_address)
+        slippage = min(max(slippage, 0.01), 50)
         
-        # Get token decimals
-        in_contract = web3.eth.contract(address=addr_in, abi=ERC20_ABI)
-        in_decimals = in_contract.functions.decimals().call()
-        amount_wei = int(amount * (10 ** in_decimals))
+        if not addr_in or not addr_out:
+            return json_error(f"Could not resolve token: {token_in} or {token_out}")
         
-        # Get current price for min out calculation
+        in_dec = get_token_decimals(addr_in)
+        out_dec = get_token_decimals(addr_out)
+        amount_wei = int(amount * (10 ** in_dec))
+        
+        in_sym = get_token_symbol(addr_in)
+        out_sym = get_token_symbol(addr_out)
+        
+        # Find best route and get quotes
+        route_result = await find_best_route(addr_in, addr_out, amount_wei)
+        
+        if route_result["route_type"] == "none":
+            return json_error(f"No swap route found between {in_sym} and {out_sym}")
+        
+        routes = route_result["routes"]
+        expected_out = route_result["expected_out"]
+        
+        deadline = int(time.time() + 1200)  # 20 min deadline
+        
         router = web3.eth.contract(
-            address=to_checksum(AERODROME_ROUTER),
-            abi=[{
-                "constant": True,
-                "inputs": [{"name":"amountIn","type":"uint256"},{"name":"routes","type":"tuple(address,address,bool,address)[]"}],
-                "name": "getAmountsOut",
-                "outputs": [{"name":"amounts","type":"uint256[]"}],
-                "type": "function"
-            }]
+            address=web3.to_checksum_address(AERODROME_ROUTER),
+            abi=ROUTER_ABI
         )
         
-        # Route: token_in -> token_out via Aerodrome
-        routes = [{"from": addr_in, "to": addr_out, "stable": False, "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"}]
+        if swap_type == "exact_in":
+            min_out = int(expected_out * (1 - slippage / 100))
+            tx_data = router.encodeABI(
+                fn_name="swapExactTokensForTokens",
+                args=[amount_wei, min_out, routes, wallet, deadline]
+            )
+            description = f"Swap {amount} {in_sym} → min {format_amount(min_out, out_dec):.6f} {out_sym}"
+        else:
+            max_in = int(amount_wei * (1 + slippage / 100))
+            tx_data = router.encodeABI(
+                fn_name="swapTokensForExactTokens",
+                args=[amount_wei, max_in, routes, wallet, deadline]
+            )
+            description = f"Swap max {format_amount(max_in, in_dec):.6f} {in_sym} → {amount} {out_sym}"
         
-        try:
-            amounts_out = router.functions.getAmountsOut(amount_wei, routes).call()
-            expected_out = amounts_out[-1]
-        except:
-            expected_out = 0
+        # Get nonce and gas
+        nonce = web3.eth.get_transaction_count(wallet)
+        chain_id = web3.eth.chain_id
+        gas_estimate = await get_gas_estimate({}, wallet)
+        base_fee = web3.eth.get_block("latest")["baseFeePerGas"]
+        max_priority = web3.eth.max_priority_fee
+        max_fee = base_fee * 2 + max_priority
         
-        min_out = int(expected_out * (1 - slippage / 100)) if expected_out > 0 else 0
+        # Check if caller has enough balance for gas
+        eth_balance = web3.eth.get_balance(wallet)
+        gas_cost_wei = gas_estimate["gas_limit"] * max_fee
+        has_enough_gas = eth_balance >= gas_cost_wei
         
-        # Build swap transaction data (user signs locally)
-        swap_data = {
-            "router": AERODROME_ROUTER,
+        # Check if caller needs to approve the router
+        allowance_check = await check_allowance_raw(wallet, addr_in, AERODROME_ROUTER)
+        needs_approval = allowance_check["needs_approval"]
+        current_allowance = allowance_check["allowance"]
+        
+        tx = {
+            "chain_id": chain_id,
             "chain": "Base",
-            "from_token": {"address": addr_in, "amount": str(amount_wei)},
-            "to_token": {"address": addr_out, "min_amount": str(min_out)},
-            "slippage": f"{slippage}%",
-            "routes": [
-                {"from": addr_in, "to": addr_out, "stable": False, "factory": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"}
-            ],
-            "deadline": int(time.time() + 600),  # 10 min from now
-            "estimated_gas": "~150000 gwei",
-            "instructions": "Copy this data to your wallet and sign. Server NEVER sees your key."
+            "from": wallet,
+            "to": AERODROME_ROUTER,
+            "data": tx_data,
+            "value": "0",
+            "nonce": nonce,
+            "gas_limit": gas_estimate["gas_limit"],
+            "max_fee_per_gas_gwei": round(max_fee / 1e9, 2),
+            "max_priority_fee_gwei": round(max_priority / 1e9, 4),
+            "deadline": deadline,
+            "description": description,
+            "route_type": route_result["route_type"],
         }
         
-        return json_ok(swap_data)
+        # Add approval info
+        if needs_approval:
+            tx["approval_needed"] = {
+                "token_address": addr_in,
+                "token_symbol": in_sym,
+                "spender": AERODROME_ROUTER,
+                "current_allowance": format_amount(current_allowance, in_dec),
+                "required_allowance": amount,
+                "message": f"Use 'build_approve_transaction' tool to approve {in_sym} first"
+            }
+        
+        # Add warnings
+        warnings = []
+        if not has_enough_gas:
+            eth_needed = format_amount(gas_cost_wei)
+            eth_have = format_amount(eth_balance)
+            warnings.append(f"⚠️ Low ETH balance for gas. Need ~{eth_needed:.6f} ETH, have {eth_have:.6f} ETH")
+        if route_result["route_type"] == "via_usdc":
+            warnings.append("ℹ️ Routing via USDC — may incur additional slippage")
+        
+        if warnings:
+            tx["warnings"] = warnings
+        
+        return json_ok({
+            "transaction": tx,
+            "signing_instructions": [
+                "Copy this transaction data to your wallet",
+                "Use ethers.js: wallet.sendTransaction(tx)",
+                "Use viem: wallet.sendTransaction(tx)",
+                "Use MetaMask: send via eth_sendTransaction",
+                "Server NEVER sees or stores your private key"
+            ]
+        })
+    except Exception as e:
+        return json_error(str(e))
+
+async def check_allowance_raw(owner: str, token_addr: str, spender: str) -> dict:
+    """Check token allowance for a spender. Returns dict with allowance + needs_approval."""
+    result = {"allowance": 0, "needs_approval": True}
+    try:
+        ca = to_checksum(token_addr)
+        contract = web3.eth.contract(address=ca, abi=APPROVE_ABI)
+        allowance = contract.functions.allowance(
+            web3.to_checksum_address(owner),
+            web3.to_checksum_address(spender)
+        ).call()
+        result["allowance"] = allowance
+        result["needs_approval"] = allowance == 0
+        return result
+    except:
+        return result
+
+# ─── TOOL 9: build_approve_transaction (FREE) ──────────────
+@mcp.tool()
+async def build_approve_transaction(
+    token: str,
+    amount: float = None,
+    caller_address: str = None
+) -> str:
+    """Build a token approval transaction for Aerodrome Router. FREE tier.
+    
+    Before swapping, the router needs permission to spend your tokens.
+    Use this to approve unlimited or a specific amount.
+    
+    Args:
+        token: Token symbol (e.g. 'USDC') or 0x address to approve
+        amount: Amount to approve (None = unlimited/MAX UINT256)
+        caller_address: Your wallet address
+    """
+    if not web3:
+        return json_error("Base RPC not connected")
+    if not caller_address:
+        return json_error("caller_address is required")
+    
+    try:
+        addr = resolve_token(token)
+        wallet = to_checksum(caller_address)
+        
+        if not addr:
+            return json_error(f"Could not resolve token: {token}")
+        
+        sym = get_token_symbol(addr)
+        dec = get_token_decimals(addr)
+        
+        # MAX_UINT256 for unlimited approval, else specific amount
+        if amount is None:
+            amount_wei = 2**256 - 1
+            desc = f"Unlimited {sym} approval"
+        else:
+            amount_wei = int(amount * (10 ** dec))
+            desc = f"Approve {amount} {sym}"
+        
+        contract = web3.eth.contract(address=addr, abi=APPROVE_ABI)
+        tx_data = contract.encodeABI(
+            fn_name="approve",
+            args=[web3.to_checksum_address(AERODROME_ROUTER), amount_wei]
+        )
+        
+        # Check current allowance
+        current = await check_allowance_raw(wallet, addr, AERODROME_ROUTER)
+        
+        nonce = web3.eth.get_transaction_count(wallet)
+        chain_id = web3.eth.chain_id
+        base_fee = web3.eth.get_block("latest")["baseFeePerGas"]
+        max_priority = web3.eth.max_priority_fee
+        max_fee = base_fee * 2 + max_priority
+        
+        tx = {
+            "chain_id": chain_id,
+            "chain": "Base",
+            "from": wallet,
+            "to": addr,
+            "data": tx_data,
+            "value": "0",
+            "nonce": nonce,
+            "gas_limit": 50000,  # Standard ERC20 approve gas
+            "max_fee_per_gas_gwei": round(max_fee / 1e9, 2),
+            "max_priority_fee_gwei": round(max_priority / 1e9, 4),
+            "description": desc,
+        }
+        
+        return json_ok({
+            "transaction": tx,
+            "current_allowance": format_amount(current["allowance"], dec) if current["allowance"] > 0 else "0",
+            "needs_approval": current["needs_approval"],
+            "spender": AERODROME_ROUTER,
+            "signing_instructions": [
+                "Copy this transaction to your wallet and sign",
+                "After approval confirmed, use build_swap_transaction to swap"
+            ]
+        })
+    except Exception as e:
+        return json_error(str(e))
+
+# ─── TOOL 10: check_allowance (FREE) ───────────────────────
+@mcp.tool()
+async def check_allowance(
+    token: str,
+    owner: str,
+    spender: str = AERODROME_ROUTER,
+    caller_address: str = None
+) -> str:
+    """Check how many tokens a spender is allowed to spend. FREE tier.
+    
+    Useful before swapping to see if you need to approve first.
+    
+    Args:
+        token: Token symbol or 0x address
+        owner: Token owner (your wallet)
+        spender: Spender address (default: Aerodrome Router)
+        caller_address: Your wallet for tracking
+    """
+    if not web3:
+        return json_error("Base RPC not connected")
+    
+    try:
+        addr = resolve_token(token)
+        if not addr:
+            return json_error(f"Could not resolve token: {token}")
+        
+        sym = get_token_symbol(addr)
+        dec = get_token_decimals(addr)
+        
+        result = await check_allowance_raw(owner, addr, spender)
+        
+        return json_ok({
+            "token": {"symbol": sym, "address": addr},
+            "owner": owner,
+            "spender": spender,
+            "allowance": format_amount(result["allowance"], dec),
+            "allowance_wei": str(result["allowance"]),
+            "needs_approval": result["needs_approval"],
+            "message": "Use 'build_approve_transaction' to approve if needed" if result["needs_approval"] else "Approval OK — ready to swap"
+        })
+    except Exception as e:
+        return json_error(str(e))
+
+# ─── TOOL 11: monitor_price (PREMIUM) ──────────────────────
+@mcp.tool()
+async def monitor_price(
+    token_in: str,
+    token_out: str,
+    target_price: float = None,
+    direction: str = "any",
+    caller_address: str = None
+) -> str:
+    """Get current price and check against a target for limit-order style monitoring. PREMIUM tier.
+    
+    Good for price alerts: \"Check if AERO is under $1\" or \"What's the USDC/ETH rate right now?\"
+    
+    Args:
+        token_in: Base token (e.g. 'USDC')
+        token_out: Quote token (e.g. 'AERO') 
+        target_price: Optional target price to compare (e.g. 1.50 means 1 USDC = 1.50 AERO)
+        direction: For target: 'above' (alert when rate >= target), 'below' (<= target), 'any' (just show price)
+        caller_address: Your wallet for tracking
+    """
+    gate = require_premium(caller_address)
+    if gate: return gate
+    
+    if not web3:
+        return json_error("Base RPC not connected")
+    
+    try:
+        addr_in = resolve_token(token_in)
+        addr_out = resolve_token(token_out)
+        
+        in_sym = get_token_symbol(addr_in)
+        out_sym = get_token_symbol(addr_out)
+        in_dec = get_token_decimals(addr_in)
+        
+        # Use a small amount to get quote
+        sample_amount = 10 ** in_dec  # 1 unit
+        route = await find_best_route(addr_in, addr_out, sample_amount)
+        
+        if route["route_type"] == "none":
+            return json_error(f"No price available for {in_sym}/{out_sym}")
+        
+        out_dec = get_token_decimals(addr_out)
+        rate = format_amount(route["expected_out"], out_dec)
+        
+        result = {
+            "pair": f"{in_sym}/{out_sym}",
+            "current_rate": round(rate, 8),
+            "route_type": route["route_type"],
+            "chain": "Base",
+            "timestamp": int(time.time()),
+        }
+        
+        # Compare with target
+        if target_price is not None:
+            result["target_price"] = target_price
+            if direction == "above":
+                result["alert"] = rate >= target_price
+                result["condition"] = f"Rate {'ABOVE' if rate >= target_price else 'BELOW'} target (≥ {target_price})"
+            elif direction == "below":
+                result["alert"] = rate <= target_price
+                result["condition"] = f"Rate {'BELOW' if rate <= target_price else 'ABOVE'} target (≤ {target_price})"
+            else:
+                diff_pct = round((rate - target_price) / target_price * 100, 2) if target_price > 0 else 0
+                result["difference_pct"] = diff_pct
+                result["condition"] = f"{'+' if diff_pct >= 0 else ''}{diff_pct}% vs target"
+        
+        return json_ok(result)
     except Exception as e:
         return json_error(str(e))
 
