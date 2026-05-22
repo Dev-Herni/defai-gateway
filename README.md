@@ -482,6 +482,17 @@ Every sign-up funds more features, better infrastructure, and faster development
 
 ---
 
+## 📋 MCP Marketplace Submissions
+
+Get DeFAI Gateway listed on the major MCP registries:
+
+- **mcp.so** → [Submit](https://mcp.so/submit) — Type: "MCP Server", URL: `https://github.com/Dev-Herni/defai-gateway`. Requires GitHub login.
+- **Smithery** → `PUT /servers/{namespace/server}/releases` with API key from smithery.ai account settings.
+
+> ⚠️ Both require the user (Henri) to log in via browser once — the agent can fill the form but can't authenticate.
+
+---
+
 ## 📜 License
 
 MIT — free to use, modify, and distribute. Built on Base and Solana.
