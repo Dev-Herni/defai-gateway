@@ -19,14 +19,18 @@ That's it. Your AI agent now has access to Base Chain.
 
 ## 🛠️ Tools
 
-| Tool | Description | Use Case |
-|------|-------------|----------|
-| `get_balance` | ETH + token balances for any wallet | Portfolio check, wallet monitoring |
-| `get_token_info` | Token name, symbol, decimals, supply | Due diligence, token research |
-| `get_gas_price` | Current Base gas in gwei | Know when to trade cheap |
-| `get_pools` | Top liquidity pools on Aerodrome | Find yield opportunities |
-| `analyze_wallet` | Full wallet breakdown | Whale tracking, portfolio analysis |
-| `track_new_tokens` | Scan for new deployments | Alpha detection, early entries |
+| Tool | Description | Tier | Use Case |
+|------|-------------|------|----------|
+| `get_balance` | ETH + token balances | 🆓 Free | Portfolio check |
+| `get_token_info` | Token name, symbol, decimals | 🆓 Free | Due diligence |
+| `get_gas_price` | Current Base gas in gwei | 🆓 Free | Know when to trade |
+| `get_pools` | Top Aerodrome liquidity pools | ⭐ Premium | Yield opportunities |
+| `analyze_wallet` | Full wallet breakdown | ⭐ Premium | Whale tracking |
+| `track_new_tokens` | Scan for new deployments | ⭐ Premium | Alpha detection |
+| `get_token_price` | Token price in USD | ⭐ Premium | Market data |
+| `get_recent_transactions` | Recent wallet txs | ⭐ Premium | Activity tracking |
+| `get_payment_status` | Check your tier + usage | ⭐ Premium | Account management |
+| `prepare_swap` | Prepare Aerodrome swap tx | 🔒 $GATE Holder | Trading |
 
 ## 📋 Requirements
 
