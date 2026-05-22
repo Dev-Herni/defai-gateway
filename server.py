@@ -1301,9 +1301,13 @@ if __name__ == "__main__":
         mcp.run(transport="sse", mount_path="/mcp")
         print(f"Serving SSE at http://0.0.0.0:{port}/mcp", file=sys.stderr)
     elif "--x402" in sys.argv:
-        print("x402 mode: Run as HTTP server with x402 payment gateway", file=sys.stderr)
+        print("x402 mode: Starting HTTP payment gateway...", file=sys.stderr)
         print("x402 USDC payments on Base — each call costs ~$0.001", file=sys.stderr)
-        port = int(sys.argv[sys.argv.index("--x402") + 1]) if "--x402" in sys.argv and len(sys.argv) > sys.argv.index("--x402") + 1 else 4020
-        mcp.run(transport="sse", mount_path="/mcp")
+        try:
+            from x402_server import run_x402_server
+            run_x402_server()
+        except ImportError as e:
+            print(f"[!] x402 module not available: {e}", file=sys.stderr)
+            print("[!] Run: python x402_server.py --port 4020", file=sys.stderr)
     else:
         mcp.run(transport="stdio")

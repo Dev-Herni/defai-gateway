@@ -31,7 +31,7 @@ python server.py
 
 ---
 
-## 🛠️ Tools (14 Total)
+## 🛠️ Tools (14 Total) + x402 Payment Gateway
 
 | # | Tool | Description | Tier |
 |---|------|-------------|------|
@@ -52,14 +52,65 @@ python server.py
 
 ---
 
+## 💰 x402 Payment Gateway (New in v2.3)
+
+**AI Agents pay per API call in USDC on Base Chain.**
+
+The x402 standard lets AI agents make HTTP calls with embedded USDC micropayments.
+
+### How it works
+
+```
+1. Agent sends USDC to FEE_WALLET on Base
+2. Agent calls POST /deposit with tx_hash
+3. Server verifies on-chain → adds credit balance
+4. Agent calls POST /mcp with tool + args
+5. Server deducts ~$0.001 per call from credit
+6. Response returned normally
+```
+
+### Start the x402 server
+
+```bash
+python x402_server.py --port 4020 --fee-wallet 0xYourWallet
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/mcp` | POST | Call any MCP tool (requires x402 header or credit) |
+| `/deposit` | POST | Verify USDC tx and add credits |
+| `/status` | GET | Check credit balance and usage |
+| `/pricing` | GET | Get pricing table + curl example |
+| `/health` | GET | Server health check |
+
+### Pricing
+
+| Feature | Cost |
+|---------|------|
+| Free tier | 10 calls/day (no payment needed) |
+| Per call | ~$0.001 USDC |
+| Minimum deposit | $0.01 USDC |
+| $GATE holders | Unlimited (no per-call fee) |
+
+---
+
 ## 🏗️ Architecture
 
 ```
-AI Agent → MCP Protocol → DeFAI Gateway ──┬── Base RPC (on-chain)
-                                           ├── Blockscout API (transactions)
-                                           ├── Aerodrome API (pools)
-                                           ├── CoinGecko API (prices)
-                                           └── Clanker API (new tokens)
+AI Agent ──┬── MCP (stdio) ──→ DeFAI Gateway ──┬── Base RPC (on-chain)
+           │                                    ├── Blockscout API (transactions)
+           │                                    ├── Aerodrome API (pools)
+           │                                    ├── CoinGecko API (prices)
+           │                                    └── Clanker API (new tokens)
+           │
+           └── HTTP (x402) ──→ x402 Payment Gateway ──┬── USDC verification (on-chain)
+                                                      ├── Credit ledger
+                                                      ├── /mcp (forward to MCP)
+                                                      ├── /deposit (add credits)
+                                                      ├── /status (check balance)
+                                                      └── /pricing (per-call costs)
 ```
 
 **Key design decisions:**
@@ -138,7 +189,16 @@ Or **hold $GATE** for unlimited access + swap execution + revenue share.
 - Price monitoring with target comparison (limit-order style)
 - Aerodrome Router ABI integration (full)
 
-### 🔜 v2.3 — Next Sprint
+### ✅ v2.3 (current)
+- **x402 Payment Gateway** — AI agents pay per API call in USDC on Base
+- HTTP endpoints: /mcp, /deposit, /status, /pricing, /health
+- Credit ledger with on-chain USDC transfer verification
+- Free tier (10 calls/day) + per-call pricing ($0.001) + $GATE holder unlimited
+- Tx dedup, balance tracking, pricing API
+- 12 x402 tests (44 total)
+- Run: `python x402_server.py --port 4020 --fee-wallet 0x...`
+
+### 🔜 v2.4 — Next Sprint
 - [ ] **x402 Payments** — AI agents pay per API call in USDC
 - [ ] **WebSocket real-time tracking** — live pool updates
 - [ ] **Limit orders** via Aerodrome
